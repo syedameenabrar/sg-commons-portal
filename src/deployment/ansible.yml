@@ -8,6 +8,7 @@
   vars:
     root_path: /opt/frontend
     project_path: "{{ root_path }}/sg-commons-portal"
+    lockfile_backup_path: "{{ root_path }}/lockfile-backups"
     vault_token_path: /opt/deployment/.token
     node_version: "20.20.2"
     pm2_home: /root/.pm2
@@ -256,11 +257,11 @@
       ansible.builtin.shell: |
         set -euo pipefail
 
-        export NVM_DIR=/root/.nvm
-        source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}" >/dev/null 2>&1
-
-        node -e "JSON.parse(require('fs').readFileSync('pm2.config.json', 'utf8'))"
+        node -e "
+          const fs = require('fs');
+          JSON.parse(fs.readFileSync('pm2.config.json', 'utf8'));
+          console.log('PM2 configuration JSON is valid');
+        "
       args:
         chdir: "{{ project_path }}"
         executable: /bin/bash
@@ -283,7 +284,186 @@
         state: absent
 
     # --------------------------------------------------
-    # 11. Collect npm diagnostics
+    # 11. Validate package.json
+    # --------------------------------------------------
+
+    - name: Check package.json exists
+      ansible.builtin.stat:
+        path: "{{ project_path }}/package.json"
+      register: package_json_file
+
+    - name: Validate package.json file exists
+      ansible.builtin.assert:
+        that:
+          - package_json_file.stat.exists
+          - package_json_file.stat.isreg
+        fail_msg: "package.json is missing from the repository."
+
+    - name: Validate package.json JSON syntax
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        node -e "
+          const fs = require('fs');
+          JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          console.log('package.json is valid');
+        "
+      args:
+        chdir: "{{ project_path }}"
+        executable: /bin/bash
+      environment:
+        PATH: "{{ node_bin_dir }}:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    # --------------------------------------------------
+    # 12. Detect corrupted package-lock.json
+    # --------------------------------------------------
+
+    - name: Check package-lock.json exists
+      ansible.builtin.stat:
+        path: "{{ project_path }}/package-lock.json"
+      register: lockfile_stat
+
+    - name: Validate package-lock.json JSON syntax
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        if [ ! -f package-lock.json ]; then
+          echo "package-lock.json is missing"
+          exit 2
+        fi
+
+        node -e "
+          const fs = require('fs');
+          const lock = JSON.parse(
+            fs.readFileSync('package-lock.json', 'utf8')
+          );
+
+          if (!lock.lockfileVersion) {
+            throw new Error('lockfileVersion is missing');
+          }
+
+          console.log('Lockfile JSON is valid');
+          console.log('Lockfile version:', lock.lockfileVersion);
+        "
+      args:
+        chdir: "{{ project_path }}"
+        executable: /bin/bash
+      environment:
+        PATH: "{{ node_bin_dir }}:{{ ansible_env.PATH }}"
+      register: lockfile_validation
+      changed_when: false
+      failed_when: false
+
+    - name: Display lockfile validation result
+      ansible.builtin.debug:
+        msg: >-
+          {% if lockfile_validation.rc == 0 %}
+          package-lock.json is valid. No repair required.
+          {% else %}
+          package-lock.json is missing or invalid. Automatic repair will start.
+          {% endif %}
+
+    # --------------------------------------------------
+    # 13. Backup corrupted lockfile
+    # --------------------------------------------------
+
+    - name: Create lockfile backup directory
+      ansible.builtin.file:
+        path: "{{ lockfile_backup_path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - lockfile_validation.rc != 0
+        - lockfile_stat.stat.exists
+
+    - name: Backup corrupted package-lock.json
+      ansible.builtin.copy:
+        src: "{{ project_path }}/package-lock.json"
+        dest: "{{ lockfile_backup_path }}/package-lock.json.corrupt-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - lockfile_validation.rc != 0
+        - lockfile_stat.stat.exists
+
+    # --------------------------------------------------
+    # 14. Automatically regenerate package-lock.json
+    # --------------------------------------------------
+
+    - name: Remove corrupted package-lock.json
+      ansible.builtin.file:
+        path: "{{ project_path }}/package-lock.json"
+        state: absent
+      when: lockfile_validation.rc != 0
+
+    - name: Regenerate package-lock.json using package.json
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        export NVM_DIR=/root/.nvm
+        source "$NVM_DIR/nvm.sh"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
+
+        echo "========== Regenerating package-lock.json =========="
+        echo "Node version: $(node --version)"
+        echo "npm version: $(npm --version)"
+
+        npm install \
+          --package-lock-only \
+          --force \
+          --ignore-scripts \
+          --no-audit \
+          --no-fund
+
+        echo "========== Lockfile regeneration completed =========="
+      args:
+        chdir: "{{ project_path }}"
+        executable: /bin/bash
+      environment:
+        PATH: "{{ node_bin_dir }}:{{ ansible_env.PATH }}"
+      register: lockfile_regeneration
+      when: lockfile_validation.rc != 0
+
+    - name: Display lockfile regeneration output
+      ansible.builtin.debug:
+        var: lockfile_regeneration.stdout_lines
+      when: lockfile_validation.rc != 0
+
+    # --------------------------------------------------
+    # 15. Verify regenerated package-lock.json
+    # --------------------------------------------------
+
+    - name: Validate final package-lock.json
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        node -e "
+          const fs = require('fs');
+          const lock = JSON.parse(
+            fs.readFileSync('package-lock.json', 'utf8')
+          );
+
+          if (!lock.lockfileVersion || !lock.packages) {
+            throw new Error('Generated lockfile is incomplete');
+          }
+
+          console.log('Final package-lock.json is valid');
+          console.log('Lockfile version:', lock.lockfileVersion);
+        "
+      args:
+        chdir: "{{ project_path }}"
+        executable: /bin/bash
+      environment:
+        PATH: "{{ node_bin_dir }}:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    # --------------------------------------------------
+    # 16. Collect npm diagnostics
     # --------------------------------------------------
 
     - name: Collect npm and package lock diagnostics
@@ -301,14 +481,15 @@
         npm --version
 
         echo "========== Package files =========="
-        ls -lh package.json package-lock.json 2>&1 || true
+        ls -lh package.json package-lock.json
 
         echo "========== Lockfile version =========="
-        if [ -f package-lock.json ]; then
-          node -e "const p=require('./package-lock.json'); console.log(p.lockfileVersion)"
-        else
-          echo "package-lock.json is missing"
-        fi
+        node -e "
+          const p = JSON.parse(
+            require('fs').readFileSync('package-lock.json', 'utf8')
+          );
+          console.log(p.lockfileVersion);
+        "
 
         echo "========== npm registry =========="
         npm config get registry
@@ -325,12 +506,12 @@
         var: npm_diagnostics.stdout_lines
 
     # --------------------------------------------------
-    # 12. Install npm dependencies and capture failures
+    # 17. Install npm dependencies
     # --------------------------------------------------
 
     - name: Install npm dependencies
       ansible.builtin.shell: |
-        set +e
+        set -Eeuo pipefail
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
@@ -344,18 +525,18 @@
 
         echo "========== Starting npm install =========="
 
-        npm install --force
-        npm_rc=$?
-
-        if [ "$npm_rc" -ne 0 ]; then
+        if npm install --force; then
+          echo "========== npm installation completed successfully =========="
+        else
+          npm_rc=$?
 
           echo "========== npm installation failed =========="
           echo "Exit code: $npm_rc"
 
-          latest_log=$(ls -t /root/.npm/_logs/*debug-0.log 2>/dev/null | head -n 1)
+          latest_log=$(ls -t /root/.npm/_logs/*debug-0.log 2>/dev/null | head -n 1 || true)
 
           if [ -n "$latest_log" ]; then
-            echo "========== npm debug log: $latest_log =========="
+            echo "========== npm debug log =========="
             tail -n 150 "$latest_log"
           else
             echo "No npm debug log found."
@@ -363,8 +544,6 @@
 
           exit "$npm_rc"
         fi
-
-        echo "========== npm installation completed successfully =========="
       args:
         chdir: "{{ project_path }}"
         executable: /bin/bash
@@ -372,8 +551,12 @@
         PATH: "{{ node_bin_dir }}:{{ ansible_env.PATH }}"
       register: npm_install
 
+    - name: Display npm installation output
+      ansible.builtin.debug:
+        var: npm_install.stdout_lines
+
     # --------------------------------------------------
-    # 13. Build frontend application
+    # 18. Build frontend application
     # --------------------------------------------------
 
     - name: Build frontend application
@@ -402,7 +585,7 @@
         var: frontend_build.stdout_lines
 
     # --------------------------------------------------
-    # 14. Check PM2 installation
+    # 19. Check PM2 installation
     # --------------------------------------------------
 
     - name: Check whether PM2 is installed
@@ -453,7 +636,7 @@
       changed_when: false
 
     # --------------------------------------------------
-    # 15. Reload application using PM2
+    # 20. Reload application using PM2
     # --------------------------------------------------
 
     - name: Ensure PM2 directory exists
@@ -502,7 +685,7 @@
       changed_when: false
 
     # --------------------------------------------------
-    # 16. Deployment completion
+    # 21. Deployment completion
     # --------------------------------------------------
 
     - name: Display deployment completion
