@@ -1,3 +1,4 @@
+
 ---
 - name: Deploy SG Commons Frontend
   hosts: all
@@ -43,7 +44,7 @@
         source "$NVM_DIR/nvm.sh"
 
         nvm install "{{ node_version }}"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         node --version
         npm --version
@@ -59,7 +60,7 @@
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
 
-        nvm use "{{ node_version }}" >/dev/null
+        nvm use "{{ node_version }}" >/dev/null 2>&1
         dirname "$(nvm which "{{ node_version }}")"
       args:
         executable: /bin/bash
@@ -76,7 +77,8 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         node --version
         npm --version
@@ -94,8 +96,9 @@
     - name: Validate Node.js version
       ansible.builtin.assert:
         that:
+          - node_versions.stdout_lines | length >= 2
           - node_versions.stdout_lines[0] == 'v' + node_version
-        fail_msg: "Expected Node.js {{ node_version }} but found {{ node_versions.stdout_lines[0] }}."
+        fail_msg: "Expected Node.js {{ node_version }} but found {{ node_versions.stdout_lines[0] | default('no version output') }}."
 
     # --------------------------------------------------
     # 3. Read Vault token
@@ -255,7 +258,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         node -e "JSON.parse(require('fs').readFileSync('pm2.config.json', 'utf8'))"
       args:
@@ -289,7 +292,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         echo "========== Node version =========="
         node --version
@@ -331,7 +334,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         echo "========== Active Node.js version =========="
         node --version
@@ -379,7 +382,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         echo "========== Building SG Commons frontend =========="
         echo "Node version: $(node --version)"
@@ -408,7 +411,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         command -v pm2
       args:
@@ -425,7 +428,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         npm install --global pm2
       args:
@@ -440,7 +443,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         pm2 --version
       args:
@@ -467,7 +470,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         pm2 startOrReload pm2.config.json --update-env
       args:
@@ -488,7 +491,7 @@
 
         export NVM_DIR=/root/.nvm
         source "$NVM_DIR/nvm.sh"
-        nvm use "{{ node_version }}"
+        nvm use "{{ node_version }}" >/dev/null 2>&1
 
         pm2 save
       args:
